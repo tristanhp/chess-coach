@@ -10,6 +10,8 @@ CREATE TABLE IF NOT EXISTS game_index(game_id TEXT PRIMARY KEY, archive_url TEXT
 CREATE TABLE IF NOT EXISTS analyses(
   game_url TEXT, username TEXT, depth INT, result TEXT, created_at REAL,
   PRIMARY KEY(game_url, username, depth));
+CREATE TABLE IF NOT EXISTS pos_cache(
+  epd TEXT, depth INT, cp_white INT, pv TEXT, PRIMARY KEY(epd, depth));
 CREATE TABLE IF NOT EXISTS kv(key TEXT PRIMARY KEY, value TEXT);
 """
 
@@ -76,6 +78,20 @@ class Store:
                 "INSERT OR REPLACE INTO analyses VALUES(?,?,?,?,?)",
                 (game_url, username, depth, json.dumps(result), time.time()),
             )
+
+    def get_pos(self, epd, depth):
+        """(cp from White's view, pv as UCI list) cached at >= depth, else None."""
+        with self._conn() as c:
+            r = c.execute(
+                "SELECT cp_white, pv FROM pos_cache WHERE epd=? AND depth>=? ORDER BY depth LIMIT 1",
+                (epd, depth),
+            ).fetchone()
+        return (r[0], json.loads(r[1])) if r else None
+
+    def put_pos(self, epd, depth, cp_white, pv):
+        with self._conn() as c:
+            c.execute("INSERT OR REPLACE INTO pos_cache VALUES(?,?,?,?)",
+                      (epd, depth, cp_white, json.dumps(pv)))
 
     def get_kv(self, key):
         with self._conn() as c:

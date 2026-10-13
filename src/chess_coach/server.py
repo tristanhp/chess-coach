@@ -57,10 +57,40 @@ async def analyze_game(game_url: str, depth: int = 14) -> str:
 
 @mcp.tool()
 async def analyze_recent(username: str = DEFAULT_USER, time_class: str = "rapid",
-                         n: int = 20, depth: int = 12, time_budget_s: int = 45) -> str:
+                         n: int = 20, depth: int = 12, time_budget_s: int = 40) -> str:
     """Aggregate coaching report over the last n games. Analyses at most ~time_budget_s seconds per
     call (0 = no limit); if games remain it says so: call again, finished games are cached."""
     return await _run(lambda: coach().analyze_recent(username, time_class, n, depth, time_budget_s))
+
+
+@mcp.tool()
+async def position_at(game_url: str, move_number: int, side: str) -> str:
+    """FEN before a move of a game (+ move played, clock, ASCII board). side: white|black. game_url may be "latest"."""
+    return await _run(lambda: coach().position_at(game_url, move_number, side))
+
+
+@mcp.tool()
+async def eval_position(fen: str, depth: int = 18, multipv: int = 3, max_seconds: int = 15) -> str:
+    """Stockfish eval of any FEN (side-to-move and White views) with top lines in SAN."""
+    return await _run(lambda: coach().eval_position(fen, depth, multipv, max_seconds))
+
+
+@mcp.tool()
+async def evaluate_move(fen: str, move: str, depth: int = 18, max_seconds: int = 15) -> str:
+    """Judge one move (SAN or UCI) in a position: eval before/after, cp loss, class, best line, and any piece left en prise."""
+    return await _run(lambda: coach().evaluate_move(fen, move, depth, max_seconds))
+
+
+@mcp.tool()
+async def explore_line(fen: str, moves: list[str], depth: int = 16, max_seconds: int = 20) -> str:
+    """Play SAN moves from a FEN ("what if..."): eval after each ply, final FEN/board, best continuation. Stops at the first illegal move."""
+    return await _run(lambda: coach().explore_line(fen, moves, depth, max_seconds))
+
+
+@mcp.tool()
+async def review_moves(game_url: str, side: str = "me", depth: int = 14) -> str:
+    """One line per move of a game (eval after, best move, cp loss), not just flagged ones. side: me|opponent|white|black|both. Resumable: call again if it says so."""
+    return await _run(lambda: coach().review_moves(game_url, side, depth))
 
 
 @mcp.tool()

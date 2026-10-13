@@ -21,6 +21,11 @@ MATE_THRESHOLD = 9000
 # Lichess judgement thresholds (0.1/0.2/0.3 on the [-1,1] winning-chances scale) in win% points
 THRESHOLDS = [("blunder", 15.0), ("mistake", 10.0), ("inaccuracy", 5.0)]
 MATERIAL_SWING = 3  # a minor piece
+WIDE = 3000  # clamp for per-move cp loss (ACPL keeps +-1000); keeps losses visible when far ahead
+
+
+class OutOfTime(Exception):
+    """Raised by evaluators when the tool's time budget is spent (progress stays cached)."""
 
 
 @dataclass
@@ -91,7 +96,7 @@ class Engine:
         self._eng = chess.engine.SimpleEngine.popen_uci(path)
         self._eng.configure({"Threads": max(1, min(4, os.cpu_count() or 1)), "Hash": 128})
 
-    def analyse(self, board, depth, time_cap=MOVE_TIME_CAP):
+    def analyse(self, board, depth, time_cap=MOVE_TIME_CAP, multipv=None):
         limit = chess.engine.Limit(depth=depth, time=time_cap)
         with self._lock:
             for attempt in (0, 1):
@@ -99,14 +104,15 @@ class Engine:
                     if self._eng is None:
                         self._start()
                     return self._eng.analyse(
-                        board, limit, info=chess.engine.INFO_SCORE | chess.engine.INFO_PV
+                        board, limit, multipv=multipv,
+                        info=chess.engine.INFO_SCORE | chess.engine.INFO_PV,
                     )
                 except (chess.engine.EngineTerminatedError, BrokenPipeError):
                     self._eng = None
                     if attempt:
                         raise
 
-    def evaluator(self, depth, time_cap=MOVE_TIME_CAP):
+    def evaluator(self, depth, time_cap=MOVE_TIME_CAP, pv_len=4):
         def evaluate(board: chess.Board, me: bool) -> Ev:
             if board.is_checkmate():
                 return Ev(MATE if board.turn != me else -MATE)
@@ -114,7 +120,7 @@ class Engine:
                 return Ev(0)
             info = self.analyse(board, depth, time_cap)
             score = info["score"].pov(me)
-            return Ev(score.score(mate_score=MATE), [m.uci() for m in info.get("pv", [])[:4]])
+            return Ev(score.score(mate_score=MATE), [m.uci() for m in info.get("pv", [])[:pv_len]])
         return evaluate
 
     def close(self):
@@ -144,7 +150,7 @@ def analyze_pgn(pgn_text: str, me: bool, evaluate, init_clock=None) -> dict:
     counts = {"inaccuracy": 0, "mistake": 0, "blunder": 0}
     by_phase = {p: dict(counts) for p in ("opening", "middlegame", "endgame")}
     errors, losses = [], []
-    n_missed_mate = n_missed_mat = n_hung = my_moves = 0
+    n_missed_mate = n_missed_mat = n_hung = my_moves = adv_moves = adv_unflagged = 0
     clock_at_20 = None
     board = game.board()
     plies = sum(1 for _ in game.mainline_moves())
@@ -167,6 +173,11 @@ def analyze_pgn(pgn_text: str, me: bool, evaluate, init_clock=None) -> dict:
         else:
             losses.append(0)
         cls = classify(drop)
+        if before.cp > 500:  # winning by more than +5: material-losing moves can slip under the win% threshold
+            adv_moves += 1
+            wide_loss = 0 if played_best else max(0, min(before.cp, WIDE) - min(after.cp, WIDE))
+            if wide_loss >= 150 and cls in (None, "inaccuracy"):
+                adv_unflagged += 1
         flags = []
         if not played_best and before.cp >= MATE_THRESHOLD and after.cp < MATE_THRESHOLD:
             flags.append("missed_mate")
@@ -199,9 +210,47 @@ def analyze_pgn(pgn_text: str, me: bool, evaluate, init_clock=None) -> dict:
     serious = [e for e in errors if e["cls"] in ("mistake", "blunder")]
     decisive = max(serious, key=lambda e: e["drop"], default=None)
     return {
-        "color": "white" if me else "black", "plies": plies, "my_moves": my_moves,
+        "v": 2, "color": "white" if me else "black", "plies": plies, "my_moves": my_moves,
         "init_clock": init_clock, "counts": counts, "by_phase": by_phase,
+        "adv_moves": adv_moves, "adv_unflagged": adv_unflagged,
         "missed_mate": n_missed_mate, "missed_material": n_missed_mat, "hung": n_hung,
         "acpl": round(sum(losses) / len(losses)) if losses else 0,
         "clock_at_20": clock_at_20, "errors": errors, "decisive": decisive,
     }
+
+
+def iter_review(pgn_text: str, colors, evaluate):
+    """Yield one row per move by `colors` (list of chess colors), eval from the mover's view.
+    `evaluate` may raise OutOfTime; rows yielded so far stay valid."""
+    game = chess.pgn.read_game(io.StringIO(pgn_text))
+    if game is None:
+        raise ValueError("no game in PGN")
+    board = game.board()
+    for node in game.mainline():
+        before_board, move = board.copy(), node.move
+        board.push(move)
+        me = before_board.turn
+        if me not in colors:
+            continue
+        before, after = evaluate(before_board, me), evaluate(board, me)
+        best_uci = before.pv[0] if before.pv else None
+        played_best = move.uci() == best_uci
+        clamp = lambda c: max(-WIDE, min(WIDE, c))  # noqa: E731
+        loss = 0 if played_best else max(0, clamp(before.cp) - clamp(after.cp))
+        drop = 0.0 if played_best else max(0.0, win_pct(before.cp) - win_pct(after.cp))
+        n = before_board.fullmove_number
+        san = before_board.san(move)
+        yield {
+            "n": f"{n}.{san}" if me == chess.WHITE else f"{n}...{san}",
+            "after": after.cp, "loss": loss, "fen": before_board.fen(), "uci": move.uci(), "cls": classify(drop), "clock": node.clock(),
+            "best": None if played_best or not best_uci
+            else before_board.san(chess.Move.from_uci(best_uci)),
+        }
+
+
+def count_moves(pgn_text: str, colors) -> int:
+    game = chess.pgn.read_game(io.StringIO(pgn_text))
+    if game is None:
+        return 0
+    return sum(1 for i, _ in enumerate(game.mainline_moves())
+               if (chess.WHITE if i % 2 == 0 else chess.BLACK) in colors)

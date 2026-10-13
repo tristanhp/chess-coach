@@ -47,6 +47,10 @@ def game_analysis(info, res, depth, max_errors=12):
         lines.append(f"... +{len(serious) - max_errors} smaller mistakes omitted")
     if not serious:
         lines.append("(none)")
+    if res.get("adv_moves"):
+        k = res.get("adv_unflagged", 0)
+        lines.append(f"Large advantage: you were above +5 for {res['adv_moves']} moves; material-losing moves may not be "
+                     f"flagged ({k} unflagged drop(s) of 1.5+ pawns); use review_moves.")
     return "\n".join(lines)
 
 
@@ -114,4 +118,20 @@ def coaching_report(username, time_class, pairs, all_infos, depth, pending, skip
     if worst:
         lines.append("Biggest swings (review these):")
         lines += [f"{i.date} {i.url} {error_line(e, False)}" for e, i in worst]
+    return "\n".join(lines)
+
+
+def review_table(info, rows, total, depth, side, done):
+    lines = [f"Review {info.date} {info.color[0].upper()} vs {info.opp} ({info.opp_rating}) "
+             f"{info.result[0].upper()} {info.how} | {side} | depth {depth} | {len(rows)}/{total} moves",
+             "move | eval after (mover view) | best if different (= none) | cp loss | ?!/?/?? by win% drop, * = loss >=200cp not flagged, hangs = piece left en prise (net material)"]
+    for r in rows:
+        mark = MARK[r["cls"]] or ("*" if r["loss"] >= 200 else "")
+        hang = "".join(f" | hangs {h['name']}(-{h['net']})" for h in r.get("hangs", []))
+        lines.append(f"{r['n']} | {fmt_eval(r['after'])} | {r['best'] or '='} | {r['loss']}{mark}{hang}")
+    if rows:
+        lines.append(f"avg cp loss {sum(r['loss'] for r in rows) / len(rows):.0f} | "
+                     + ", ".join(f"{k} {sum(1 for r in rows if r['cls'] == k)}" for k in ("inaccuracy", "mistake", "blunder")))
+    if not done:
+        lines.append(f"Time budget reached after {len(rows)}/{total} moves: call again to continue (progress is cached).")
     return "\n".join(lines)

@@ -128,7 +128,7 @@ class ChessComClient:
                     continue
                 yield g
 
-    def find_game(self, url, username=DEFAULT_USER):
+    def find_game(self, url, username=DEFAULT_USER, deadline=None):
         gid = game_id(url)
         if not gid:
             return None
@@ -142,6 +142,8 @@ class ChessComClient:
         if archive and (g := search(archive)):
             return g
         for a in reversed(self.archives(username)):  # not indexed yet: scan newest first
+            if deadline and time.time() > deadline:
+                break  # keep the whole tool call inside its time budget
             if a != archive and (g := search(a)):
                 return g
         return None
