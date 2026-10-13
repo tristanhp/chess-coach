@@ -28,6 +28,7 @@ class GameInfo:
     accuracy: float | None
     init_clock: float | None
     pgn: str
+    increment: float = 0.0
 
     @property
     def date(self):
@@ -70,6 +71,11 @@ def initial_clock(time_control: str | None) -> float | None:
     return float(m[1]) if m and "/" not in (time_control or "") else None
 
 
+def increment(time_control: str | None) -> float:
+    m = re.match(r"^\d+\+(\d+)", time_control or "")
+    return float(m[1]) if m else 0.0
+
+
 def summarize(g: dict, username: str) -> GameInfo | None:
     """None if the game isn't standard chess or `username` isn't a player."""
     if g.get("rules", "chess") != "chess" or not g.get("pgn"):
@@ -95,4 +101,5 @@ def summarize(g: dict, username: str) -> GameInfo | None:
         opp_rating=theirs.get("rating"), result=result, my_code=code, opp_code=theirs["result"],
         opening=name, family=fam, plies=plies, accuracy=acc,
         init_clock=initial_clock(pg.headers.get("TimeControl")), pgn=g["pgn"],
+        increment=increment(pg.headers.get("TimeControl")),
     )

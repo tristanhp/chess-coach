@@ -94,14 +94,44 @@ async def review_moves(game_url: str, side: str = "me", depth: int = 14) -> str:
 
 
 @mcp.tool()
+async def get_puzzle(tag: str | None = None, hint: bool = False) -> str:
+    """Next "find the best move" puzzle built from the user's own mistakes (spaced repetition). tag: e.g. missed_mate, ignored_threat, endgame."""
+    return await _run(lambda: coach().get_puzzle(tag, hint))
+
+
+@mcp.tool()
+async def submit_answer(puzzle_id: int, move: str) -> str:
+    """Check a puzzle answer (SAN or UCI); reveals the solution when wrong and schedules the puzzle."""
+    return await _run(lambda: coach().submit_answer(puzzle_id, move))
+
+
+@mcp.tool()
+async def save_note(text: str, topic: str = "focus") -> str:
+    """Remember something between coaching sessions (topic "focus" is shown by get_last_sync/mark_synced)."""
+    return await _run(lambda: coach().save_note(text, topic))
+
+
+@mcp.tool()
+async def get_notes(topic: str | None = None, limit: int = 10) -> str:
+    """Saved coaching notes, newest first."""
+    return await _run(lambda: coach().get_notes(topic, limit))
+
+
+@mcp.tool()
+async def delete_note(note_id: int) -> str:
+    """Delete a saved note."""
+    return await _run(lambda: coach().delete_note(note_id))
+
+
+@mcp.tool()
 async def mark_synced() -> str:
-    """Record now as the 'last coaching session' (for list_games since="last_sync")."""
+    """Record now as the 'last coaching session' (for list_games since="last_sync") and save a progress snapshot (blunders/game etc., compared with the previous one)."""
     return await _run(lambda: coach().mark_synced())
 
 
 @mcp.tool()
 async def get_last_sync() -> str:
-    """When the last coaching session was marked."""
+    """When the last coaching session was marked, plus the current focus notes."""
     return await _run(lambda: coach().get_last_sync())
 
 

@@ -12,10 +12,10 @@ import chess.engine
 import chess.pgn
 
 from .config import MOVE_TIME_CAP, stockfish_path
+from .tactics import VALUES, en_prise_after
 
 log = logging.getLogger("chess_coach.analysis")
 
-VALUES = {chess.PAWN: 1, chess.KNIGHT: 3, chess.BISHOP: 3, chess.ROOK: 5, chess.QUEEN: 9}
 MATE = 10000
 MATE_THRESHOLD = 9000
 # Lichess judgement thresholds (0.1/0.2/0.3 on the [-1,1] winning-chances scale) in win% points
@@ -134,7 +134,7 @@ class Engine:
                 pass
 
 
-def analyze_pgn(pgn_text: str, me: bool, evaluate, init_clock=None) -> dict:
+def analyze_pgn(pgn_text: str, me: bool, evaluate, init_clock=None, increment=0.0) -> dict:
     """Classify `me`'s moves. `evaluate(board, me) -> Ev` (from me's point of view)."""
     game = chess.pgn.read_game(io.StringIO(pgn_text))
     if game is None:
@@ -152,6 +152,7 @@ def analyze_pgn(pgn_text: str, me: bool, evaluate, init_clock=None) -> dict:
     errors, losses = [], []
     n_missed_mate = n_missed_mat = n_hung = my_moves = adv_moves = adv_unflagged = 0
     clock_at_20 = None
+    thinks, prev_clock = [], init_clock
     board = game.board()
     plies = sum(1 for _ in game.mainline_moves())
 
@@ -192,6 +193,20 @@ def analyze_pgn(pgn_text: str, me: bool, evaluate, init_clock=None) -> dict:
             if line_gain(before_board, [move.uci()] + after.pv[:2], me) <= -MATERIAL_SWING:
                 flags.append("hung_piece")
                 n_hung += 1
+        cl = node.clock()
+        think = None
+        if cl is not None and prev_clock is not None:
+            think = round(max(0.0, prev_clock + increment - cl), 1)
+        thinks.append(think)
+        prev_clock = cl if cl is not None else prev_clock
+        if cls in ("mistake", "blunder"):  # why: static tactics check on the position before/after the move
+            for h in en_prise_after(before_board, move):
+                if h["net"] >= 2:
+                    flag = "ignored_threat" if h["was"] else "left_hanging"
+                    if flag not in flags:
+                        flags.append(flag)
+            if after.cp <= -MATE_THRESHOLD < before.cp:
+                flags.append("allowed_mate")
         if not cls and not flags:
             continue
         if cls:
@@ -204,13 +219,13 @@ def analyze_pgn(pgn_text: str, me: bool, evaluate, init_clock=None) -> dict:
             "n": f"{n}.{san}" if me == chess.WHITE else f"{n}...{san}",
             "best": best_san, "cls": cls, "flags": flags, "drop": round(drop, 1),
             "before": before.cp, "after": after.cp, "phase": game_phase(before_board),
-            "clock": node.clock(), "fen": before_board.fen(),
+            "clock": node.clock(), "think": think, "fen": before_board.fen(),
         })
 
     serious = [e for e in errors if e["cls"] in ("mistake", "blunder")]
     decisive = max(serious, key=lambda e: e["drop"], default=None)
     return {
-        "v": 2, "color": "white" if me else "black", "plies": plies, "my_moves": my_moves,
+        "v": 3, "thinks": thinks, "color": "white" if me else "black", "plies": plies, "my_moves": my_moves,
         "init_clock": init_clock, "counts": counts, "by_phase": by_phase,
         "adv_moves": adv_moves, "adv_unflagged": adv_unflagged,
         "missed_mate": n_missed_mate, "missed_material": n_missed_mat, "hung": n_hung,

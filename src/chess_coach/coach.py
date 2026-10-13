@@ -9,13 +9,14 @@ from datetime import datetime, timezone
 import chess
 import chess.pgn
 
-from . import positions
+from . import positions, training
 from .analysis import Ev, Engine, OutOfTime, analyze_pgn, count_moves, iter_review
 from .chesscom import ChessComClient
 from .config import DB_PATH, DEFAULT_USER, MOVE_TIME_CAP
 from .db import Store
 from .games import GameInfo, summarize
-from .report import coaching_report, game_analysis, mmss, review_table
+from .report import (coaching_report, compute_metrics, game_analysis, metrics_line, mmss,
+                     review_table)
 
 log = logging.getLogger("chess_coach")
 MIN_PLIES = 6  # shorter games (aborts, early resigns) have nothing to coach
@@ -131,7 +132,7 @@ class Coach:
 
     def _cached_analysis(self, info, username, depth):
         c = self.store.get_analysis(info.url, username.lower(), depth)
-        return c if c and c.get("v", 1) >= 2 else None  # v1 results lack the large-advantage data
+        return c if c and c.get("v", 1) >= 3 else None  # older results lack think times / cause tags
 
     def _analysis(self, info: GameInfo, username, depth, deadline=None):
         """(result, cached) or (None, False) if the time budget ran out (progress stays cached)."""
@@ -142,13 +143,14 @@ class Coach:
             t0 = time.time()
             try:
                 res = analyze_pgn(info.pgn, info.color == "white",
-                                  self._game_evaluator(depth, deadline), info.init_clock)
+                                  self._game_evaluator(depth, deadline), info.init_clock, info.increment)
             except OutOfTime:
                 print(f"  out of time on {info.url}", file=sys.stderr, flush=True)
                 return None, False
             print(f"  analysed {info.url} ({info.plies} plies) in {time.time() - t0:.0f}s",
                   file=sys.stderr, flush=True)
         self.store.put_analysis(info.url, username.lower(), depth, res)
+        training.add_from_result(self.store, info.url, username.lower(), res, info.date, info.opp)
         return res, False
 
     def analyze_game(self, game_url, depth=14, username=DEFAULT_USER):
@@ -243,13 +245,65 @@ class Coach:
             done = False
         return review_table(info, rows, total, depth, side, done)
 
+    # -- training --------------------------------------------------------
+    def get_puzzle(self, tag=None, hint=False, username=DEFAULT_USER):
+        return training.get_puzzle(self.store, username.lower(), tag, hint)
+
+    def submit_answer(self, puzzle_id, move):
+        return training.submit_answer(self.store, self.engine, int(puzzle_id), move)
+
+    # -- notes / progress ------------------------------------------------
+    def save_note(self, text, topic="focus"):
+        nid = self.store.add_note(text.strip(), topic or "focus")
+        return f"Saved note #{nid} [{topic}]."
+
+    def get_notes(self, topic=None, limit=10):
+        rows = self.store.get_notes(topic, limit)
+        if not rows:
+            return "No notes yet."
+        return "\n".join(f"#{r['id']} {_ts(r['ts'])[:10]} [{r['topic']}] {r['text']}" for r in rows)
+
+    def delete_note(self, note_id):
+        return f"Deleted note #{note_id}." if self.store.delete_note(int(note_id)) else f"No note #{note_id}."
+
+    def _snapshot(self, username, time_class="rapid", n=20):
+        infos = self._infos(username, time_class, None, n)
+        pairs = []
+        for i in infos:
+            if i.plies < MIN_PLIES:
+                continue
+            res = self._cached_analysis(i, username, 1)
+            if res:
+                pairs.append((i, res))
+        return compute_metrics(pairs, infos)
+
     # -- sync marker -----------------------------------------------------
-    def mark_synced(self):
+    def mark_synced(self, username=DEFAULT_USER):
         prev = self.store.get_kv("last_sync")
         now = time.time()
         self.store.set_kv("last_sync", now)
-        return f"Marked synced at {_ts(now)}" + (f" (previous: {_ts(float(prev))})" if prev else "")
+        out = [f"Marked synced at {_ts(now)}" + (f" (previous: {_ts(float(prev))})" if prev else "")]
+        try:
+            snap = self._snapshot(username.lower())
+        except Exception as e:  # offline etc.: the marker is still saved
+            snap, out = None, out + [f"(no progress snapshot: {type(e).__name__})"]
+        if snap:
+            pts, before = self.store.last_snapshot(username.lower(), "rapid")
+            self.store.add_snapshot(username.lower(), "rapid", snap)
+            out.append(f"Progress, last {snap['n']} analysed rapid games"
+                       + (f" vs snapshot of {_ts(pts)[:10]} ({before['n']} games)" if before else " (first snapshot)")
+                       + ": " + metrics_line(snap, before))
+        elif snap is None and len(out) == 1:
+            out.append("No analysed games yet, so no progress snapshot (run analyze_recent first).")
+        notes = self.store.get_notes("focus", 3)
+        if notes:
+            out.append("Focus: " + " / ".join(r["text"] for r in notes))
+        return "\n".join(out)
 
     def get_last_sync(self):
         v = self.store.get_kv("last_sync")
-        return f"Last coaching session: {_ts(float(v))}" if v else "No coaching session recorded yet."
+        out = f"Last coaching session: {_ts(float(v))}" if v else "No coaching session recorded yet."
+        notes = self.store.get_notes("focus", 3)
+        if notes:
+            out += "\nFocus: " + " / ".join(f"#{r['id']} {r['text']}" for r in notes)
+        return out

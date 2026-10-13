@@ -17,7 +17,8 @@ def mmss(sec):
 def error_line(e, with_fen=True):
     flags = ",".join(e["flags"])
     s = (f"{e['n']}{MARK[e['cls']]} best {e['best'] or '-'} | "
-         f"{fmt_eval(e['before'])}→{fmt_eval(e['after'])} | {SHORT[e['phase']]} | clk {mmss(e['clock'])}")
+         f"{fmt_eval(e['before'])}→{fmt_eval(e['after'])} | {SHORT[e['phase']]} | clk {mmss(e['clock'])}"
+         + (f" | think {e['think']:.0f}s" if e.get("think") is not None else ""))
     if flags:
         s += f" | {flags}"
     return s + (f" | {e['fen']}" if with_fen else "")
@@ -90,6 +91,24 @@ def coaching_report(username, time_class, pairs, all_infos, depth, pending, skip
     lines.append(f"Hung a piece in one move: {hung} ({sum(1 for r in res if r['hung'])}/{n} games) | "
                  f"missed mates {sum(r['missed_mate'] for r in res)} | "
                  f"missed material wins {sum(r['missed_material'] for r in res)}")
+    serious = [e for r in res for e in r["errors"] if e["cls"] in ("mistake", "blunder")]
+    if serious:
+        cnt = lambda f: sum(1 for e in serious if f in e["flags"])  # noqa: E731
+        other = sum(1 for e in serious if not set(e["flags"]) & {"ignored_threat", "left_hanging", "allowed_mate", "missed_mate", "missed_material"})
+        lines.append(f"Causes of {len(serious)} mistakes/blunders: ignored opponent's threat {cnt('ignored_threat')} | "
+                     f"moved into/left a piece hanging {cnt('left_hanging')} | allowed mate {cnt('allowed_mate')} | "
+                     f"missed mate {cnt('missed_mate')} | missed free material {cnt('missed_material')} | other {other}")
+    thinks = [t for r in res for t in r.get("thinks", []) if t is not None]
+    if thinks:
+        fast = lambda xs: sum(1 for t in xs if t < 5) / len(xs)  # noqa: E731
+        bt = [e["think"] for e in serious if e.get("think") is not None]
+        tl = f"Think time: avg {sum(thinks) / len(thinks):.0f}s/move, median {sorted(thinks)[len(thinks) // 2]:.0f}s"
+        if bt:
+            tl += (f" | mistakes/blunders avg {sum(bt) / len(bt):.0f}s; {100 * fast(bt):.0f}% under 5s "
+                   f"vs {100 * fast(thinks):.0f}% of all moves")
+            if fast(bt) >= 0.5 and fast(bt) > 1.3 * fast(thinks):
+                tl += " → most errors are quick moves: slow down and check the opponent's last move"
+        lines.append(tl)
     for color in ("white", "black"):
         agg = defaultdict(lambda: [0, 0.0])
         for i in all_infos:
@@ -135,3 +154,38 @@ def review_table(info, rows, total, depth, side, done):
     if not done:
         lines.append(f"Time budget reached after {len(rows)}/{total} moves: call again to continue (progress is cached).")
     return "\n".join(lines)
+
+
+METRICS = [("blunders", "blunders/game"), ("mistakes", "mistakes/game"), ("hung", "hung pieces/game"),
+           ("ignored", "ignored threats/game"), ("missed_mate", "missed mates/game"), ("acpl", "ACPL"),
+           ("think", "avg think s")]
+
+
+def compute_metrics(pairs, infos):
+    n = len(pairs)
+    if not n:
+        return None
+    res = [r for _, r in pairs]
+    th = [t for r in res for t in r.get("thinks", []) if t is not None]
+    serious = [e for r in res for e in r["errors"] if e["cls"] in ("mistake", "blunder")]
+    rated = [i.my_rating for i in infos if i.my_rating]
+    return {"n": n, "rating": rated[0] if rated else None,
+            "blunders": sum(r["counts"]["blunder"] for r in res) / n,
+            "mistakes": sum(r["counts"]["mistake"] for r in res) / n,
+            "hung": sum(r["hung"] for r in res) / n,
+            "ignored": sum(1 for e in serious if "ignored_threat" in e["flags"]) / n,
+            "missed_mate": sum(r["missed_mate"] for r in res) / n,
+            "acpl": sum(r["acpl"] for r in res) / n,
+            "think": sum(th) / len(th) if th else None}
+
+
+def metrics_line(m, prev=None):
+    parts = []
+    for key, label in METRICS:
+        if m.get(key) is None:
+            continue
+        s = f"{label} {m[key]:.1f}" if key != "acpl" else f"{label} {m[key]:.0f}"
+        if prev and prev.get(key) is not None:
+            s = s.replace(f" {m[key]:.1f}", f" {prev[key]:.1f}→{m[key]:.1f}") if key != "acpl" else f"{label} {prev[key]:.0f}→{m[key]:.0f}"
+        parts.append(s)
+    return " | ".join(parts)

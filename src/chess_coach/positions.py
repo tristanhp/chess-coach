@@ -4,10 +4,9 @@ import time
 
 import chess
 
+from .tactics import en_prise, en_prise_after  # noqa: F401  (re-exported)
 from .analysis import (MATE, VALUES, WIDE, classify, fmt_eval, line_gain, win_pct)
 
-PIECE_WORD = {1: "pawn", 2: "knight", 3: "bishop", 4: "rook", 5: "queen", 6: "king"}
-SEE_VALUE = {**VALUES, chess.KING: 100}
 MAX_SECONDS = 30  # hard clamp: the bridge to the caller times out at 60 s
 MAX_PLIES = 20
 UCI_RE = re.compile(r"^[a-h][1-8][a-h][1-8][qrbn]?$")
@@ -61,70 +60,6 @@ def parse_move(board: chess.Board, text: str):
         return None, f"{kind.capitalize()} move '{text}' ({'white' if board.turn else 'black'} to move). Legal: {legal}"
 
 
-def _see(board: chess.Board, sq: int, depth: int = 0):
-    """Net material the side to move wins by capturing on `sq` (exchange simulation). (net, [(san, victim)])."""
-    caps = [m for m in board.legal_moves if m.to_square == sq and board.piece_type_at(sq)]
-    if not caps or depth > 8:
-        return 0, []
-    m = min(caps, key=lambda m: SEE_VALUE[board.piece_type_at(m.from_square)])
-    victim = board.piece_type_at(sq)
-    san = board.san(m)
-    b = board.copy(stack=False)
-    b.push(m)
-    sub, line = _see(b, sq, depth + 1)
-    net = SEE_VALUE[victim] - sub
-    if net <= 0:
-        return 0, []
-    return net, [(san, victim)] + (line if sub > 0 else [])
-
-
-def _letters(types):
-    return "+".join(sorted((chess.piece_symbol(t).upper() for t in types), key=lambda c: -"PNBRQ".index(c))) or "nothing"
-
-
-def en_prise(board: chess.Board, owner: bool):
-    """Pieces of `owner` that the side to move (the opponent) wins material on. board.turn must be the opponent."""
-    out = []
-    for sq, p in board.piece_map().items():
-        if p.color != owner or p.piece_type == chess.KING:
-            continue
-        net, line = _see(board, sq)
-        if net <= 0:
-            continue
-        att = board.attackers(not owner, sq)
-        dfn = board.attackers(owner, sq)
-        low_att = min(att, key=lambda s: SEE_VALUE[board.piece_type_at(s)])
-        desc = (f"{chess.piece_symbol(p.piece_type).upper()} on {chess.square_name(sq)} attacked by "
-                f"{PIECE_WORD[board.piece_type_at(low_att)]} {chess.square_name(low_att)} ({len(att)}x), defended {len(dfn)}x")
-        if dfn:
-            low_def = min(dfn, key=lambda s: SEE_VALUE[board.piece_type_at(s)])
-            desc += f" (lowest: {chess.piece_symbol(board.piece_type_at(low_def)).upper()}{chess.square_name(low_def)})"
-        lost = [v for i, (_, v) in enumerate(line) if i % 2 == 0]
-        back = [v for i, (_, v) in enumerate(line) if i % 2 == 1]
-        out.append({"sq": sq, "net": net,
-                    "text": f"{desc}: loses {_letters(lost)} for {_letters(back)} after {line[0][0]} (net -{net})"})
-    return sorted(out, key=lambda e: -e["net"])
-
-
-def en_prise_after(board_before: chess.Board, move: chess.Move):
-    """Pieces left en prise by `move`, each tagged if it was already hanging before the move."""
-    mover = board_before.turn
-    after = board_before.copy(stack=False)
-    after.push(move)
-    already = set()
-    if not board_before.is_check():
-        nb = board_before.copy(stack=False)
-        nb.push(chess.Move.null())
-        already = {e["sq"] for e in en_prise(nb, mover)}
-    res = []
-    for e in en_prise(after, mover):
-        was = e["sq"] in already and e["sq"] != move.to_square
-        piece = chess.piece_symbol(after.piece_type_at(e["sq"])).upper()
-        res.append({**e, "was": was, "piece": piece, "name": piece + chess.square_name(e["sq"]),
-                    "full": e["text"] + (" [was already hanging before this move]" if was else "")})
-    return res
-
-
 def eval_both(cp: int, turn: bool) -> str:
     """'+3.2 (Black to move) | -3.2 (White)' style."""
     mover, other = ("White", "Black") if turn else ("Black", "White")
@@ -163,18 +98,10 @@ def eval_position(engine, fen, depth=18, multipv=3, max_seconds=15) -> str:
     return "\n".join(lines)
 
 
-def evaluate_move(engine, fen, move, depth=18, max_seconds=15) -> str:
-    board, err = parse_fen(fen)
-    if err:
-        return err
-    mv, err = parse_move(board, move)
-    if err:
-        return err
+def judge_move(engine, board, mv, depth, seconds):
+    """Evaluate `mv` in `board` from the mover's side. Returns a dict (also used by the puzzle checker)."""
     me = board.turn
-    san = board.san(mv)
-    label = f"{board.fullmove_number}{'.' if me else '...'}{san}"
-    depth, half = max(1, min(int(depth), 40)), clamp_seconds(max_seconds) / 2
-    ev = engine.evaluator(depth, half, pv_len=8)
+    ev = engine.evaluator(depth, seconds / 2, pv_len=8)
     before = ev(board, me)
     after_board = board.copy(stack=False)
     after_board.push(mv)
@@ -185,13 +112,21 @@ def evaluate_move(engine, fen, move, depth=18, max_seconds=15) -> str:
     loss = 0 if played_best else max(0, clamp(before.cp) - clamp(after.cp))
     drop = 0.0 if played_best else max(0.0, win_pct(before.cp) - win_pct(after.cp))
     cls = classify(drop) or ("best" if played_best or loss <= 5 else "good")
+    return {"me": me, "before": before, "after": after, "after_board": after_board, "best_uci": best_uci,
+            "played_best": played_best, "loss": loss, "drop": drop, "cls": cls}
+
+
+def render_move(board, mv, j) -> str:
+    me, before, after, cls, loss, drop = j["me"], j["before"], j["after"], j["cls"], j["loss"], j["drop"]
+    after_board = j["after_board"]
+    label = f"{board.fullmove_number}{'.' if me else '...'}{board.san(mv)}"
     note = (f" (win% barely moves because you are far ahead, but it costs {loss}cp)"
             if cls in ("good", "inaccuracy") and loss >= 150 else "")
     out = [f"{label} ({'White' if me else 'Black'}): eval {fmt_eval(before.cp)} → {fmt_eval(after.cp)} (mover view) | "
            f"loss {loss}cp | win% {win_pct(before.cp):.0f}→{win_pct(after.cp):.0f} (-{drop:.0f}) | {cls.upper()}{note}"]
-    if best_uci and not played_best:
+    if j["best_uci"] and not j["played_best"]:
         out.append(f"Best: {board.variation_san([chess.Move.from_uci(u) for u in before.pv])} ({fmt_eval(before.cp)})")
-    elif played_best:
+    elif j["played_best"]:
         out.append("Played the engine's top move.")
     if after.pv:
         out.append(f"Then: {after_board.variation_san([chess.Move.from_uci(u) for u in after.pv])}")
@@ -204,6 +139,17 @@ def evaluate_move(engine, fen, move, depth=18, max_seconds=15) -> str:
         out.append("EN PRISE after this move" + (" (even though the position may stay winning)" if cls in ("best", "good") or after.cp > 300 else "") + ":")
         out += [f"  {h['full']}" for h in hang[:3]]
     return "\n".join(out)
+
+
+def evaluate_move(engine, fen, move, depth=18, max_seconds=15) -> str:
+    board, err = parse_fen(fen)
+    if err:
+        return err
+    mv, err = parse_move(board, move)
+    if err:
+        return err
+    j = judge_move(engine, board, mv, max(1, min(int(depth), 40)), clamp_seconds(max_seconds))
+    return render_move(board, mv, j)
 
 
 def explore_line(engine, fen, moves, depth=16, max_seconds=20) -> str:

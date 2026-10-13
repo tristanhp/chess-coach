@@ -37,11 +37,16 @@ The default username is set in `src/chess_coach/config.py` (`DEFAULT_USER`). Cac
 | `evaluate_move(fen, move, depth=18, max_seconds=15)` | SAN or UCI move: eval before/after, cp loss, win% drop, best/good/inaccuracy/mistake/blunder, best line, material change, and any piece left **en prise** (even when still winning) |
 | `explore_line(fen, moves, depth=16, max_seconds=20)` | play SAN moves out ("what if..."): eval after each ply, final FEN + board, best continuation; stops at the first illegal move |
 | `review_moves(game_url, side="me", depth=14)` | one line per move (eval after, best move, cp loss, newly hanging pieces). `side`: me/opponent/white/black/both. Resumable |
-| `mark_synced()` / `get_last_sync()` | store / read the "last coaching session" time |
+| `get_puzzle(tag=None, hint=False)` / `submit_answer(puzzle_id, move)` | "find the best move" puzzles built automatically from your mistakes, missed mates and missed material (Leitner spaced repetition: 10 min → 1/3/7/21 days). Another move within 60 cp of the best also counts; a wrong answer reveals the line |
+| `save_note(text, topic="focus")` / `get_notes` / `delete_note` | memory between sessions; `focus` notes are shown by `get_last_sync` and `mark_synced` |
+| `mark_synced()` / `get_last_sync()` | store / read the "last coaching session" time. `mark_synced` also saves a progress snapshot (blunders/game, hung pieces, ACPL, think time...) and compares it with the previous one |
 
 Notes:
 - Classification uses win% = 50 + 50·(2/(1+e^(−0.00368208·cp)) − 1) from your side; drops of ≥5 / ≥10 / ≥15 points are
   inaccuracy / mistake / blunder. Phase: opening ≤ move 12, endgame when ≤ 20 points of non-pawn material remain.
+- `analyze_recent` also reports think time per move (from the PGN clocks, increment included) and tags each mistake/blunder:
+  ignored the opponent's threat (a piece was already en prise and still is), moved into/left a piece hanging, allowed mate,
+  missed mate, missed free material. Cached analyses from before this were recomputed once.
 - Each position gets a depth cap plus a 0.5 s time cap, with one reused Stockfish process.
 - `analyze_recent` stops starting new games after `time_budget_s` (Claude Desktop times tool calls out at ~60 s).
   If games remain it says so; just call it again, finished games are cached. Use `time_budget_s=0` for no limit.
