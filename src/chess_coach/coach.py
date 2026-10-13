@@ -1,6 +1,7 @@
 """Tool logic (kept separate from the MCP wiring so it can be tested)."""
 import io
 import logging
+import re
 import sys
 import threading
 import time
@@ -112,9 +113,9 @@ class Coach:
             return None, "Not a standard-chess game played by " + username
         return info, None
 
-    def _game_evaluator(self, depth, deadline=None):
+    def _game_evaluator(self, depth, deadline=None, pv_len=4):
         """Engine evaluator backed by the per-position cache; raises OutOfTime past `deadline`."""
-        raw = self.engine.evaluator(depth, MOVE_TIME_CAP)
+        raw = self.engine.evaluator(depth, MOVE_TIME_CAP, pv_len=pv_len)
 
         def evaluate(board, me):
             if board.is_game_over():
@@ -244,6 +245,28 @@ class Coach:
         except OutOfTime:
             done = False
         return review_table(info, rows, total, depth, side, done)
+
+    # -- viewer ----------------------------------------------------------
+    def open_game_viewer(self, game_url="latest", depth=14, open_browser=True, ply=None, username=DEFAULT_USER):
+        from .viewer import Viewer, open_in_browser
+
+        if getattr(self, "viewer", None) is None:
+            self.viewer = Viewer(self)
+        self.viewer.start()
+        if game_url.strip().lower() in ("", "games", "list"):
+            url, what = self.viewer.url(), "Games list"
+        else:
+            info, err = self._resolve(game_url, username, time.time() + 25)
+            if err:
+                return err
+            gid = re.search(r"(\d{6,})", info.url)[1]
+            self.viewer.ensure_job(gid, max(6, min(int(depth), 30)), username)  # start evaluating right away
+            url, what = self.viewer.url(gid, max(6, min(int(depth), 30))), f"{info.date} vs {info.opp}"
+            url += f"#{int(ply)}" if ply is not None else ""
+        how = open_in_browser(url) if open_browser else ""
+        return (f"{what}: {url}\n" + (f"Opened in your browser ({how}). " if how else "Open that URL in your browser. ")
+                + "Evaluations fill in live in the background (cached positions are instant); the games list is at "
+                + self.viewer.url())
 
     # -- training --------------------------------------------------------
     def get_puzzle(self, tag=None, hint=False, username=DEFAULT_USER):

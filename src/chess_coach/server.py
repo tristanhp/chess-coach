@@ -94,6 +94,13 @@ async def review_moves(game_url: str, side: str = "me", depth: int = 14) -> str:
 
 
 @mcp.tool()
+async def open_game_viewer(game_url: str = "latest", depth: int = 14, open_browser: bool = True,
+                           ply: int | None = None) -> str:
+    """Open a chess.com-analysis-style page (board, eval bar/graph, per-move evals and quality badges) in the user's browser; evals stream in live. game_url may be "latest" or "games" (list); ply opens at that half-move (e.g. 45 = after 23.Nf3)."""
+    return await _run(lambda: coach().open_game_viewer(game_url, depth, open_browser, ply))
+
+
+@mcp.tool()
 async def get_puzzle(tag: str | None = None, hint: bool = False) -> str:
     """Next "find the best move" puzzle built from the user's own mistakes (spaced repetition). tag: e.g. missed_mate, ignored_threat, endgame."""
     return await _run(lambda: coach().get_puzzle(tag, hint))

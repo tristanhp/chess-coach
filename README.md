@@ -37,6 +37,7 @@ The default username is set in `src/chess_coach/config.py` (`DEFAULT_USER`). Cac
 | `evaluate_move(fen, move, depth=18, max_seconds=15)` | SAN or UCI move: eval before/after, cp loss, win% drop, best/good/inaccuracy/mistake/blunder, best line, material change, and any piece left **en prise** (even when still winning) |
 | `explore_line(fen, moves, depth=16, max_seconds=20)` | play SAN moves out ("what if..."): eval after each ply, final FEN + board, best continuation; stops at the first illegal move |
 | `review_moves(game_url, side="me", depth=14)` | one line per move (eval after, best move, cp loss, newly hanging pieces). `side`: me/opponent/white/black/both. Resumable |
+| `open_game_viewer(game_url="latest", depth=14, open_browser=True, ply=None)` | opens a chess.com-analysis-style page in your browser: board, eval bar and graph, move list with an eval and quality badge on every move (best / excellent / good / inaccuracy / mistake / blunder / miss), best-move arrow, engine line, accuracy per side, clocks, keyboard navigation (←/→/Home/End, `f` flips). Evals stream in live and reuse the position cache. `game_url="games"` opens a clickable list of recent games |
 | `get_puzzle(tag=None, hint=False)` / `submit_answer(puzzle_id, move)` | "find the best move" puzzles built automatically from your mistakes, missed mates and missed material (Leitner spaced repetition: 10 min → 1/3/7/21 days). Another move within 60 cp of the best also counts; a wrong answer reveals the line |
 | `save_note(text, topic="focus")` / `get_notes` / `delete_note` | memory between sessions; `focus` notes are shown by `get_last_sync` and `mark_synced` |
 | `mark_synced()` / `get_last_sync()` | store / read the "last coaching session" time. `mark_synced` also saves a progress snapshot (blunders/game, hung pieces, ACPL, think time...) and compares it with the previous one |
@@ -47,6 +48,9 @@ Notes:
 - `analyze_recent` also reports think time per move (from the PGN clocks, increment included) and tags each mistake/blunder:
   ignored the opponent's threat (a piece was already en prise and still is), moved into/left a piece hanging, allowed mate,
   missed mate, missed free material. Cached analyses from before this were recomputed once.
+- The viewer is a tiny web server on `127.0.0.1:8765` (next free port up to 8784) inside the MCP process, so it lives as long as
+  Claude Desktop keeps the server running. It only accepts `Host: 127.0.0.1/localhost`. The browser is opened with `wslview`,
+  `explorer.exe`, `cmd.exe start` or `xdg-open` (first available); the URL is always returned too. Use `#N` in the URL to open at half-move N.
 - Each position gets a depth cap plus a 0.5 s time cap, with one reused Stockfish process.
 - `analyze_recent` stops starting new games after `time_budget_s` (Claude Desktop times tool calls out at ~60 s).
   If games remain it says so; just call it again, finished games are cached. Use `time_budget_s=0` for no limit.
